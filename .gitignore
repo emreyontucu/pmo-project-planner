@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environment
+backend/.venv/
+.venv/
+env/
+venv/
+ENV/
+
+# VS Code settings (contains absolute local paths)
+.vscode/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Pyrefly and Pyright caches
+.pyre/
+.pytype/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+pyrightconfig.json
+pyrefly.toml
+
+# Local environment variables
+backend/.env
+.env
