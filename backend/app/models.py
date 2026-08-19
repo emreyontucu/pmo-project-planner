@@ -1,6 +1,6 @@
 import datetime
 from typing import List, Optional
-from sqlalchemy import ForeignKey, String, Date, Boolean, Text, Integer, DateTime, func
+from sqlalchemy import ForeignKey, String, Date, Boolean, Text, Integer, DateTime, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .database import Base
 
@@ -13,7 +13,8 @@ class Project(Base):
     manager: Mapped[Optional[str]] = mapped_column(String(255))
     start_date: Mapped[Optional[datetime.date]] = mapped_column(Date)
     target_end_date: Mapped[Optional[datetime.date]] = mapped_column(Date)
-    status: Mapped[str] = mapped_column(String(50), default="Draft") # Draft, Final
+    status: Mapped[str] = mapped_column(String(50), default="Draft") # Draft, Final (plan-publishing gate)
+    business_status: Mapped[Optional[str]] = mapped_column(String(30)) # Proje Durumu: Aktif, Beklemede, Tamamlandı
     description: Mapped[Optional[str]] = mapped_column(Text)
     exclude_bridge_days: Mapped[bool] = mapped_column(Boolean, default=False)
     
@@ -23,6 +24,7 @@ class Project(Base):
     # Relationships
     tasks: Mapped[List["Task"]] = relationship("Task", back_populates="project", cascade="all, delete-orphan")
     dependencies: Mapped[List["TaskDependency"]] = relationship("TaskDependency", back_populates="project", cascade="all, delete-orphan")
+    answers: Mapped[List["ProjectAnswer"]] = relationship("ProjectAnswer", back_populates="project", cascade="all, delete-orphan")
 
 
 class Task(Base):
@@ -35,9 +37,16 @@ class Task(Base):
     is_milestone: Mapped[bool] = mapped_column(Boolean, default=False)
     sorumlu: Mapped[Optional[str]] = mapped_column(String(255))
     duration: Mapped[int] = mapped_column(Integer, default=1) # in work days
-    start_date: Mapped[Optional[datetime.date]] = mapped_column(Date)
-    end_date: Mapped[Optional[datetime.date]] = mapped_column(Date)
-    
+    start_date: Mapped[Optional[datetime.date]] = mapped_column(Date) # Planlanan Başlangıç
+    end_date: Mapped[Optional[datetime.date]] = mapped_column(Date) # Planlanan Bitiş
+
+    # Fields from the company's "Görev Takip" Excel template (see constants.py for fixed choice lists)
+    phase: Mapped[Optional[str]] = mapped_column(String(255)) # Proje Aşaması (S1..S5)
+    priority: Mapped[Optional[str]] = mapped_column(String(20)) # Öncelik: Kritik, Yüksek, Orta, Düşük
+    status: Mapped[str] = mapped_column(String(30), default="Başlamadı") # Durum
+    actual_start_date: Mapped[Optional[datetime.date]] = mapped_column(Date) # Gerçekleşen Başlangıç
+    actual_end_date: Mapped[Optional[datetime.date]] = mapped_column(Date) # Gerçekleşen Bitiş
+
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -75,3 +84,21 @@ class TaskDependency(Base):
     project: Mapped["Project"] = relationship("Project", back_populates="dependencies")
     task: Mapped["Task"] = relationship("Task", foreign_keys=[task_id], back_populates="predecessor_links")
     predecessor: Mapped["Task"] = relationship("Task", foreign_keys=[predecessor_id], back_populates="successor_links")
+
+
+class ProjectAnswer(Base):
+    """Stores answers to the rule-based questionnaire (e.g. 'Penetrasyon testi planlanıyor mu?')
+    that fills in project-type-relevant gaps the Excel template has no column for."""
+    __tablename__ = "project_answers"
+    __table_args__ = (UniqueConstraint("project_id", "question_key", name="uq_project_question"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    question_key: Mapped[str] = mapped_column(String(100))
+    answer: Mapped[str] = mapped_column(String(20)) # Evet, Hayır, Opsiyonel
+
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    # Relationships
+    project: Mapped["Project"] = relationship("Project", back_populates="answers")
