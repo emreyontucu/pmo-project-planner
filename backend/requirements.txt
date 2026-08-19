@@ -4,6 +4,7 @@ sqlalchemy>=2.0.0
 asyncpg>=0.28.0
 pandas>=2.0.0
 openpyxl>=3.1.0
+python-multipart>=0.0.9
 python-dotenv>=1.0.0
 holidays>=0.30
 pydantic>=2.0.0
