@@ -41,18 +41,36 @@ async def _get_task_or_404(task_id: int, db: AsyncSession) -> Task:
     return task
 
 
-async def _check_predecessor_violation(task: Task, new_start_date, db: AsyncSession) -> Optional[str]:
-    """Returns a warning message if new_start_date violates a finish-to-start predecessor, else None."""
-    if new_start_date is None or not task.predecessor_links:
-        return None
+async def _check_dependency_violation(task: Task, new_start_date, new_end_date, db: AsyncSession) -> Optional[str]:
+    """Checks if the proposed schedule violates any finish-to-start constraints.
+    Checks:
+    1. Predecessors: Does this task start before any predecessor ends?
+    2. Successors: Does this task end after any successor starts?
+    """
+    # 1. Check predecessor constraints
+    if new_start_date is not None and task.predecessor_links:
+        predecessor_ids = [link.predecessor_id for link in task.predecessor_links]
+        result = await db.execute(select(Task).where(Task.id.in_(predecessor_ids)))
+        predecessors = result.scalars().all()
 
-    predecessor_ids = [link.predecessor_id for link in task.predecessor_links]
-    result = await db.execute(select(Task).where(Task.id.in_(predecessor_ids)))
-    predecessors = result.scalars().all()
+        for pred in predecessors:
+            if pred.end_date is not None and new_start_date < pred.end_date:
+                return f"{task.name}, {pred.name} tamamlanmadan başlayamaz."
 
-    for pred in predecessors:
-        if pred.end_date is not None and new_start_date < pred.end_date:
-            return f"Task '{task.name}', Task '{pred.name}' tamamlanmadan başlayamaz."
+    # 2. Check successor constraints
+    if new_end_date is not None:
+        from ..models import TaskDependency
+        dep_result = await db.execute(select(TaskDependency).where(TaskDependency.predecessor_id == task.id))
+        links = dep_result.scalars().all()
+        if links:
+            successor_ids = [link.task_id for link in links]
+            result = await db.execute(select(Task).where(Task.id.in_(successor_ids)))
+            successors = result.scalars().all()
+
+            for succ in successors:
+                if succ.start_date is not None and new_end_date > succ.start_date:
+                    return f"{succ.name}, {task.name} tamamlanmadan başlayamaz."
+
     return None
 
 
@@ -79,8 +97,14 @@ async def update_task(task_id: int, payload: schemas.TaskUpdate, db: AsyncSessio
     task = await _get_task_or_404(task_id, db)
     updates = payload.model_dump(exclude_unset=True)
 
-    if "start_date" in updates and updates["start_date"] is not None:
-        warning = await _check_predecessor_violation(task, updates["start_date"], db)
+    candidate_start = updates.get("start_date", task.start_date)
+    candidate_end = updates.get("end_date", task.end_date)
+    is_milestone = updates.get("is_milestone", task.is_milestone)
+    if is_milestone:
+        candidate_end = candidate_start
+
+    if ("start_date" in updates or "end_date" in updates or "is_milestone" in updates):
+        warning = await _check_dependency_violation(task, candidate_start, candidate_end, db)
         if warning:
             raise HTTPException(status_code=400, detail=warning)
 

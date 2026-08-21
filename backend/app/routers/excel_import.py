@@ -105,8 +105,11 @@ async def reimport_project_tasks(
             detail="Bu plan için daha önce görev verisi yüklenmiştir. Üzerine yazmak için overwrite=true parametresiyle tekrar deneyin.",
         )
 
+    print(f"DEBUG EXCEL IMPORT: Filename={file.filename}")
     sheets = await _read_workbook(file)
+    print(f"DEBUG EXCEL IMPORT: Available sheets={list(sheets.keys())}")
     task_sheet_name = find_task_sheet(sheets)
+    print(f"DEBUG EXCEL IMPORT: Selected sheet={task_sheet_name}")
     if task_sheet_name is None:
         raise HTTPException(status_code=400, detail="Excel dosyasında görev listesini içeren bir sayfa bulunmalıdır (örn. 'Görev Takip').")
 
