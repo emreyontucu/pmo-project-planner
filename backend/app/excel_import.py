@@ -3,9 +3,10 @@ import re
 from typing import Dict, List, Optional, Set, Tuple
 
 import pandas as pd
+from fastapi import HTTPException
 
 from .calendar_service import calendar_service
-from .constants import TASK_PRIORITIES, TASK_STATUSES
+from .constants import TASK_PRIORITIES, TASK_STATUSES, PROJECT_PHASES
 
 # Turkish -> ASCII normalization so header matching survives casing/typo variance
 # (İ handled explicitly because str.lower() turns it into "i̇", not "i")
@@ -38,16 +39,46 @@ TASK_SHEET_ALIASES = {"gorevler", "tasks", "task", "gorev", "gorev listesi", "go
 # Gerçekleşen Bitiş, Not. There is no dependency column — dependencies are added
 # manually in the UI.
 TASK_FIELDS: Dict[str, Set[str]] = {
-    "task": {"gorev adi", "gorev", "task"},
-    "phase": {"proje asamasi", "proje adimi", "asama", "faz"},
-    "sorumlu": {"sorumlu"},
-    "priority": {"oncelik", "priority"},
-    "status": {"durum", "status"},
-    "planned_start": {"planlanan baslangic", "baslangic tarihi"},
-    "actual_start": {"gerceklesen baslangic"},
-    "planned_end": {"planlanan bitis", "bitis tarihi"},
-    "actual_end": {"gerceklesen bitis"},
-    "note": {"not", "notlar", "aciklama"},
+    "task": {
+        "gorev adi", "gorev", "task", "gorev adı", "gorev_adi", "görev", "görev adı", 
+        "görevadı", "gorevadi", "görev_adı"
+    },
+    "phase": {
+        "proje asamasi", "proje adimi", "asama", "faz", "proje aşaması", "proje_asamasi", 
+        "proje_aşama", "proje asama", "aşama", "proje fazi", "proje fazı"
+    },
+    "sorumlu": {
+        "sorumlu", "assignee", "owner", "sorumlu kisi", "sorumlusu", "sorumlu kişi"
+    },
+    "priority": {
+        "oncelik", "priority", "ozellik", "öncelik", "özellik"
+    },
+    "status": {
+        "durum", "status", "gorev durumu", "görev durumu", "durumu"
+    },
+    "planned_start": {
+        "planlanan baslangic", "baslangic tarihi", "planlanan baslangic tarihi", 
+        "planlanan başlangıç tarihi", "planlanan başlangıç", "plananlanan baslangic tarihi", 
+        "plananlanan başlangıç tarihi", "plananlanan baslangic", "plananlanan başlangıç"
+    },
+    "actual_start": {
+        "gerceklesen baslangic", "gerceklesen baslangic tarihi", "gerçekleşen başlangıç tarihi", 
+        "gerçekleşen başlangıç", "gerçekleşen başlaganic", "gerceklesen baslaganic", 
+        "gerçekleşen başlaganıç", "gerçekleşen başlangiç", "gerceklesen baslangic"
+    },
+    "planned_end": {
+        "planlanan bitis", "bitis tarihi", "planlanan bitis tarihi", "planlanan bitiş tarihi", 
+        "planlanan bitiş", "planlanan bitişş tarihi", "planlanan bitiss tarihi", 
+        "planlanan bitisş tarihi", "planlanan bitişş"
+    },
+    "actual_end": {
+        "gerceklesen bitis", "gerceklesen bitis tarihi", "gerçekleşen bitiş tarihi", 
+        "gerçekleşen bitiş", "gerçekleşen bitişş tarihi", "gerceklesen bitiss tarihi", 
+        "gerçekleşen bitişş", "gerceklesen bitis"
+    },
+    "note": {
+        "not", "notlar", "aciklama", "açıklama"
+    },
 }
 
 
@@ -109,16 +140,49 @@ def _col_map(df: pd.DataFrame, fields: Dict[str, Set[str]]) -> Dict[str, str]:
 
 
 def find_task_sheet(sheets: Dict[str, pd.DataFrame]) -> Optional[str]:
-    """Finds the task sheet by name first, falling back to the first sheet that
-    actually has a recognizable 'Görev Adı' column (skips pure lookup/reference
-    sheets like a 'Proje Aşaması' dropdown-source tab)."""
+    """Finds the task sheet. If there is only one sheet, uses it directly.
+    Otherwise, matches by name aliases first, then falls back to the sheet
+    with the most recognizable task columns."""
+    if not sheets:
+        return None
+    if len(sheets) == 1:
+        return list(sheets.keys())[0]
+
     named = pick_sheet(sheets, TASK_SHEET_ALIASES)
     if named is not None:
         return named
+
+    best_sheet = None
+    max_matches = 0
     for name, df in sheets.items():
-        if "task" in _col_map(df, TASK_FIELDS):
-            return name
-    return None
+        colmap = _col_map(df, TASK_FIELDS)
+        if "task" in colmap:
+            matches = len(colmap)
+            if matches > max_matches:
+                max_matches = matches
+                best_sheet = name
+    return best_sheet
+
+
+def _normalize_phase(phase_str: Optional[str]) -> Optional[str]:
+    if not phase_str:
+        return None
+    phase_clean = phase_str.strip()
+    match = re.match(r"^[sS]([1-5])", phase_clean)
+    if match:
+        code = f"S{match.group(1)}"
+        for c, label in PROJECT_PHASES:
+            if c == code:
+                return f"{c} - {label}"
+    return phase_clean
+
+
+def _phase_sort_key(task: dict) -> Tuple[int, str]:
+    phase_str = task.get("phase") or ""
+    match = re.match(r"^[sS]([1-5])", phase_str.strip())
+    if match:
+        return (int(match.group(1)), task.get("name") or "")
+    return (99, task.get("name") or "")
 
 
 def parse_tasks_sheet(df: pd.DataFrame, exclude_bridge_days: bool = False) -> Tuple[List[dict], List[str]]:
@@ -138,7 +202,7 @@ def parse_tasks_sheet(df: pd.DataFrame, exclude_bridge_days: bool = False) -> Tu
             return row[col] if col is not None else None
 
         name = _to_str(get("task"))
-        phase = _to_str(get("phase"))
+        phase_raw = _to_str(get("phase"))
         sorumlu = _to_str(get("sorumlu"))
         priority_raw = _to_str(get("priority"))
         status_raw = _to_str(get("status"))
@@ -148,7 +212,7 @@ def parse_tasks_sheet(df: pd.DataFrame, exclude_bridge_days: bool = False) -> Tu
         actual_end = _to_date(get("actual_end"))
         note = _to_str(get("note"))
 
-        if not any([name, phase, sorumlu, priority_raw, status_raw, planned_start, planned_end, note]):
+        if not any([name, phase_raw, sorumlu, priority_raw, status_raw, planned_start, planned_end, actual_start, actual_end, note]):
             warnings.append(f"Satır {excel_row_no}: tamamen boş, atlandı.")
             continue
 
@@ -156,8 +220,11 @@ def parse_tasks_sheet(df: pd.DataFrame, exclude_bridge_days: bool = False) -> Tu
             warnings.append(f"Satır {excel_row_no}: Görev Adı boş olduğu için satır atlandı.")
             continue
 
+        # Normalize phase string
+        phase = _normalize_phase(phase_raw)
+
         if not note:
-            warnings.append(f"'{name}' için Not alanı boş.")
+            warnings.append(f"'{name}' için açıklama alanı boş.")
 
         priority = _PRIORITY_LOOKUP.get(_norm(priority_raw)) if priority_raw else None
         if priority_raw and priority is None:
@@ -166,6 +233,39 @@ def parse_tasks_sheet(df: pd.DataFrame, exclude_bridge_days: bool = False) -> Tu
         status = _STATUS_LOOKUP.get(_norm(status_raw)) if status_raw else None
         if status_raw and status is None:
             warnings.append(f"'{name}' için durum değeri ('{status_raw}') tanınmadı, 'Başlamadı' olarak ayarlandı.")
+
+        # 1. Validation: Completed tasks must have an actual end date
+        resolved_status = status or "Başlamadı"
+        if resolved_status == "Tamamlandı" and not actual_end:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Satır {excel_row_no}: '{name}' görevinin durumu 'Tamamlandı' olduğu için 'Gerçekleşen Bitiş' tarihi girilmesi zorunludur."
+            )
+
+        # 2. Validation: Planned/Actual Start and Planned/Actual End dates cannot be weekend or public holiday
+        for date_val, label in [
+            (planned_start, "Planlanan Başlangıç"),
+            (actual_start, "Gerçekleşen Başlangıç"),
+            (planned_end, "Planlanan Bitiş"),
+            (actual_end, "Gerçekleşen Bitiş"),
+        ]:
+            if date_val:
+                if calendar_service.is_weekend(date_val) or calendar_service.is_public_holiday(date_val):
+                    holiday_name = calendar_service.get_holiday_name(date_val)
+                    err_msg = f"Satır {excel_row_no}: '{name}' görevinin {label} tarihi ({date_val.strftime('%d.%m.%Y')}) resmî tatile veya hafta sonuna denk gelmektedir ({holiday_name or 'Hafta Sonu'})."
+                    raise HTTPException(status_code=400, detail=err_msg)
+
+        # 3. Warnings: Check for bridge days
+        for date_val, label in [
+            (planned_start, "Planlanan Başlangıç"),
+            (actual_start, "Gerçekleşen Başlangıç"),
+            (planned_end, "Planlanan Bitiş"),
+            (actual_end, "Gerçekleşen Bitiş"),
+        ]:
+            if date_val and calendar_service.is_bridge_day(date_val):
+                warnings.append(
+                    f"Satır {excel_row_no}: '{name}' görevinin {label} tarihi ({date_val.strftime('%d.%m.%Y')}) köprü gününe denk gelmektedir."
+                )
 
         duration = 1
         if planned_start and planned_end:
@@ -183,8 +283,11 @@ def parse_tasks_sheet(df: pd.DataFrame, exclude_bridge_days: bool = False) -> Tu
             "actual_end_date": actual_end,
             "phase": phase,
             "priority": priority,
-            "status": status or "Başlamadı",
+            "status": resolved_status,
             "predecessor_names": [],
         })
+
+    # Sort tasks by phase hierarchy (S1 -> S2 -> S3 -> S4 -> S5)
+    tasks.sort(key=_phase_sort_key)
 
     return tasks, warnings
