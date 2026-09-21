@@ -7,9 +7,9 @@ import type { CalendarDay, Task } from "@/lib/types";
 
 const DAY_TYPE_STYLES: Record<CalendarDay["day_type"], string> = {
   WORK: "bg-white",
-  WEEKEND: "bg-slate-100",
-  HOLIDAY: "bg-red-50",
-  BRIDGE: "bg-amber-50",
+  WEEKEND: "bg-slate-200",
+  HOLIDAY: "bg-red-200",
+  BRIDGE: "bg-amber-200",
 };
 
 const WEEKDAY_LABELS = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"];

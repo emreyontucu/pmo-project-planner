@@ -15,8 +15,11 @@ class Project(Base):
     target_end_date: Mapped[Optional[datetime.date]] = mapped_column(Date)
     status: Mapped[str] = mapped_column(String(50), default="Draft") # Draft, Final (plan-publishing gate)
     business_status: Mapped[Optional[str]] = mapped_column(String(30)) # Proje Durumu: Aktif, Beklemede, Tamamlandı
+    sector: Mapped[Optional[str]] = mapped_column(String(100)) # Sektör: Vestel, Enerji, Maden, Tekstil, Holding
+    companies: Mapped[Optional[str]] = mapped_column(Text) # Bağlı Şirketler (virgülle ayrılmış veya JSON)
     description: Mapped[Optional[str]] = mapped_column(Text)
     exclude_bridge_days: Mapped[bool] = mapped_column(Boolean, default=False)
+
     
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
@@ -25,6 +28,22 @@ class Project(Base):
     tasks: Mapped[List["Task"]] = relationship("Task", back_populates="project", cascade="all, delete-orphan")
     dependencies: Mapped[List["TaskDependency"]] = relationship("TaskDependency", back_populates="project", cascade="all, delete-orphan")
     answers: Mapped[List["ProjectAnswer"]] = relationship("ProjectAnswer", back_populates="project", cascade="all, delete-orphan")
+    audit_logs: Mapped[List["ProjectAuditLog"]] = relationship("ProjectAuditLog", back_populates="project", cascade="all, delete-orphan")
+
+
+class ProjectAuditLog(Base):
+    """Stores change history / activity logs for project changes (tasks, statuses, dates, excel imports, etc.)."""
+    __tablename__ = "project_audit_logs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    action: Mapped[str] = mapped_column(String(100)) # e.g. "GÖREV_EKLENDİ", "DURUM_DEĞİŞTİ", "TARİH_GÜNCELLENDİ", "EXCEL_YÜKLENDİ", "SIRALAMA_DEĞİŞTİ", "BAĞIMLILIK_EKLENDİ", "İPTAL_EDİLDİ"
+    details: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+    # Relationships
+    project: Mapped["Project"] = relationship("Project", back_populates="audit_logs")
+
 
 
 class Task(Base):
@@ -46,6 +65,7 @@ class Task(Base):
     status: Mapped[str] = mapped_column(String(30), default="Başlamadı") # Durum
     actual_start_date: Mapped[Optional[datetime.date]] = mapped_column(Date) # Gerçekleşen Başlangıç
     actual_end_date: Mapped[Optional[datetime.date]] = mapped_column(Date) # Gerçekleşen Bitiş
+    order_index: Mapped[int] = mapped_column(Integer, default=0) # Sıralama indeksi
 
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
