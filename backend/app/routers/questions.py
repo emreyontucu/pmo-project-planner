@@ -1,21 +1,29 @@
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from ..audit_service import log_audit
+from ..calendar_service import calendar_service
 from ..database import get_db
 from ..models import Project, ProjectAnswer, Task
-from ..questionnaire import ANSWER_CHOICES, EXTRA_QUESTIONS
+from ..questionnaire import WBS_QUESTIONS
 from .. import schemas
 
-router = APIRouter(prefix="/projects/{project_id}/questions", tags=["questions"])
+
+router = APIRouter(prefix="/projects/{project_id}", tags=["wbs-wizard"])
 
 
-async def _get_project_or_404(project_id: int, db: AsyncSession) -> Project:
+async def _get_project_detail(project_id: int, db: AsyncSession) -> Project:
     result = await db.execute(
         select(Project)
-        .options(selectinload(Project.tasks), selectinload(Project.answers))
+        .options(
+            selectinload(Project.tasks),
+            selectinload(Project.dependencies),
+            selectinload(Project.answers),
+            selectinload(Project.audit_logs),
+        )
         .where(Project.id == project_id)
     )
     project = result.scalar_one_or_none()
@@ -24,70 +32,114 @@ async def _get_project_or_404(project_id: int, db: AsyncSession) -> Project:
     return project
 
 
-def _description_gap_key(task: Task) -> str:
-    return f"task:{task.id}:description"
+@router.get("/wbs-wizard", response_model=List[schemas.WBSWizardQuestionDTO])
+async def get_wbs_wizard_questions(project_id: int, db: AsyncSession = Depends(get_db)):
+    """Returns the comprehensive WBS Scope questions along with suggested tasks and existing answers."""
+    project = await _get_project_detail(project_id, db)
+    answer_map = {a.question_key: a.answer for a in project.answers}
+
+    dto_list: List[schemas.WBSWizardQuestionDTO] = []
+    for q in WBS_QUESTIONS:
+        tasks = [
+            schemas.WBSWizardTaskInput(
+                name=t.name,
+                phase=t.phase,
+                description=t.description,
+                sorumlu=t.sorumlu,
+                priority=t.priority,
+                duration=t.duration,
+                is_milestone=t.is_milestone,
+                start_date=t.start_date or project.start_date,
+                end_date=t.end_date,
+            )
+            for t in q.suggested_tasks
+        ]
+        dto_list.append(
+            schemas.WBSWizardQuestionDTO(
+                key=q.key,
+                category=q.category,
+                question=q.question,
+                description=q.description,
+                icon_type=q.icon_type,
+                vendor_field_label=q.vendor_field_label,
+                current_answer=answer_map.get(q.key),
+                suggested_tasks=tasks,
+            )
+        )
+    return dto_list
 
 
-@router.get("", response_model=List[schemas.PendingQuestion])
-async def get_pending_questions(project_id: int, db: AsyncSession = Depends(get_db)):
-    """Rule-based (no LLM) chatbot question list: never re-asks data already present,
-    only surfaces required fields left blank + project-type questions the Excel has no column for."""
-    project = await _get_project_or_404(project_id, db)
+@router.post("/wbs-wizard/apply", response_model=schemas.WBSWizardApplyResult)
+async def apply_wbs_wizard(
+    project_id: int,
+    payload: schemas.WBSWizardApplyRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Applies the project manager's answers to the WBS questionnaire and creates the confirmed tasks."""
+    project = await _get_project_detail(project_id, db)
 
-    pending: List[schemas.PendingQuestion] = []
-    for task in project.tasks:
-        if not task.description:
-            pending.append(schemas.PendingQuestion(
-                type="field_gap",
-                key=_description_gap_key(task),
-                text=f"'{task.name}' için açıklama nedir?",
-            ))
+    # 1. Save / Update answers
+    existing_answers = {a.question_key: a for a in project.answers}
+    for q_key, answer_val in payload.answers.items():
+        clean_val = str(answer_val).strip()
+        if not clean_val:
+            continue
+        if q_key in existing_answers:
+            existing_answers[q_key].answer = clean_val
+        else:
+            new_ans = ProjectAnswer(project_id=project.id, question_key=q_key, answer=clean_val)
+            db.add(new_ans)
 
-    answered_keys = {a.question_key for a in project.answers}
-    for q in EXTRA_QUESTIONS:
-        if q["key"] not in answered_keys:
-            pending.append(schemas.PendingQuestion(
-                type="extra_question",
-                key=q["key"],
-                text=q["text"],
-                choices=sorted(ANSWER_CHOICES),
-            ))
+    # 2. Get current max order_index
+    res = await db.execute(select(func.max(Task.order_index)).where(Task.project_id == project.id))
+    current_max_order = res.scalar() or 0
 
-    return pending
+    # Avoid duplicating task names if already exist
+    existing_task_names = {t.name.strip().lower() for t in project.tasks}
 
+    created_count = 0
+    for idx, t_input in enumerate(payload.tasks_to_create):
+        clean_name = t_input.name.strip()
+        if clean_name.lower() in existing_task_names:
+            continue  # Avoid duplicate insertion
 
-@router.post("/answer", response_model=schemas.PendingQuestion)
-async def submit_answer(project_id: int, payload: schemas.QuestionAnswerSubmit, db: AsyncSession = Depends(get_db)):
-    project = await _get_project_or_404(project_id, db)
-    value = payload.value.strip()
-    if not value:
-        raise HTTPException(status_code=400, detail="Cevap boş olamaz.")
+        duration = t_input.duration
+        if t_input.start_date and t_input.end_date:
+            duration = calendar_service.get_working_days_count(
+                t_input.start_date, t_input.end_date, project.exclude_bridge_days
+            ) or 1
 
-    if payload.key.startswith("task:") and payload.key.endswith(":description"):
-        try:
-            task_id = int(payload.key.split(":")[1])
-        except (IndexError, ValueError):
-            raise HTTPException(status_code=400, detail="Geçersiz soru anahtarı.")
+        new_task = Task(
+            project_id=project.id,
+            name=clean_name,
+            phase=t_input.phase,
+            description=t_input.description,
+            sorumlu=t_input.sorumlu,
+            priority=t_input.priority,
+            duration=duration,
+            is_milestone=t_input.is_milestone,
+            start_date=t_input.start_date,
+            end_date=t_input.end_date,
+            status="Başlamadı",
+            order_index=current_max_order + idx + 1,
+        )
+        db.add(new_task)
+        existing_task_names.add(clean_name.lower())
+        created_count += 1
 
-        task = next((t for t in project.tasks if t.id == task_id), None)
-        if task is None:
-            raise HTTPException(status_code=404, detail="Bu projeye ait böyle bir task bulunamadı.")
+    if created_count > 0:
+        await log_audit(
+            db,
+            project.id,
+            "WBS_SİHİRBAZI_UYGULANDI",
+            f"Akıllı WBS Sihirbazı ile {created_count} yeni iş paketi ve görevi oluşturuldu.",
+        )
 
-        task.description = value
-        await db.flush()
-        return schemas.PendingQuestion(type="field_gap", key=payload.key, text=f"'{task.name}' için açıklama nedir?")
-
-    question = next((q for q in EXTRA_QUESTIONS if q["key"] == payload.key), None)
-    if question is None:
-        raise HTTPException(status_code=404, detail="Bilinmeyen soru anahtarı.")
-    if value not in ANSWER_CHOICES:
-        raise HTTPException(status_code=400, detail=f"Cevap şunlardan biri olmalıdır: {', '.join(sorted(ANSWER_CHOICES))}.")
-
-    existing = next((a for a in project.answers if a.question_key == payload.key), None)
-    if existing is not None:
-        existing.answer = value
-    else:
-        db.add(ProjectAnswer(project_id=project.id, question_key=payload.key, answer=value))
     await db.flush()
 
-    return schemas.PendingQuestion(type="extra_question", key=question["key"], text=question["text"], choices=sorted(ANSWER_CHOICES))
+    # Re-fetch project details
+    refreshed_project = await _get_project_detail(project.id, db)
+    return schemas.WBSWizardApplyResult(
+        created_tasks_count=created_count,
+        project=refreshed_project,
+    )

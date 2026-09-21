@@ -1,5 +1,5 @@
 import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from .constants import PROJECT_BUSINESS_STATUSES, TASK_PRIORITIES, TASK_STATUSES
@@ -18,6 +18,8 @@ class ProjectBase(BaseModel):
     start_date: Optional[datetime.date] = None
     target_end_date: Optional[datetime.date] = None
     business_status: Optional[str] = None
+    sector: Optional[str] = None
+    companies: Optional[str] = None
     description: Optional[str] = None
     exclude_bridge_days: bool = False
 
@@ -38,6 +40,8 @@ class ProjectUpdate(BaseModel):
     start_date: Optional[datetime.date] = None
     target_end_date: Optional[datetime.date] = None
     business_status: Optional[str] = None
+    sector: Optional[str] = None
+    companies: Optional[str] = None
     description: Optional[str] = None
     exclude_bridge_days: Optional[bool] = None
 
@@ -68,6 +72,7 @@ class TaskBase(BaseModel):
     end_date: Optional[datetime.date] = None
     actual_start_date: Optional[datetime.date] = None
     actual_end_date: Optional[datetime.date] = None
+    order_index: int = 0
 
     @field_validator("priority")
     @classmethod
@@ -96,6 +101,7 @@ class TaskUpdate(BaseModel):
     end_date: Optional[datetime.date] = None
     actual_start_date: Optional[datetime.date] = None
     actual_end_date: Optional[datetime.date] = None
+    order_index: Optional[int] = None
 
     @field_validator("priority")
     @classmethod
@@ -108,6 +114,28 @@ class TaskUpdate(BaseModel):
         return _validate_choice(v, TASK_STATUSES, "Durum")
 
 
+class TaskReorderRequest(BaseModel):
+    task_ids: List[int]
+
+
+class TaskDependencyBase(BaseModel):
+    task_id: int
+    predecessor_id: int
+    dependency_type: str = "FS"
+
+
+class TaskDependencyCreate(TaskDependencyBase):
+    pass
+
+
+class TaskDependencyRead(TaskDependencyBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    created_at: datetime.datetime
+
+
 class TaskRead(TaskBase):
     model_config = ConfigDict(from_attributes=True)
 
@@ -118,34 +146,39 @@ class TaskRead(TaskBase):
     updated_at: datetime.datetime
 
 
-class TaskDependencyCreate(BaseModel):
-    task_id: int
-    predecessor_id: int
-    dependency_type: str = "FS"
+class ProjectAnswerBase(BaseModel):
+    question_key: str
+    answer: str
 
 
-class TaskDependencyRead(BaseModel):
+class ProjectAnswerCreate(ProjectAnswerBase):
+    pass
+
+
+class ProjectAnswerRead(ProjectAnswerBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     project_id: int
-    task_id: int
-    predecessor_id: int
-    dependency_type: str
     created_at: datetime.datetime
+    updated_at: datetime.datetime
 
 
-class ProjectAnswerRead(BaseModel):
+class ProjectAuditLogRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    question_key: str
-    answer: str
+    id: int
+    project_id: int
+    action: str
+    details: str
+    created_at: datetime.datetime
 
 
 class ProjectDetail(ProjectRead):
     tasks: List[TaskRead] = []
     dependencies: List[TaskDependencyRead] = []
     answers: List[ProjectAnswerRead] = []
+    audit_logs: List[ProjectAuditLogRead] = []
 
 
 class PendingQuestion(BaseModel):
@@ -175,3 +208,36 @@ class CalendarDay(BaseModel):
 class ExcelImportResult(BaseModel):
     project: ProjectDetail
     warnings: List[str] = []
+
+
+class WBSWizardTaskInput(BaseModel):
+    name: str
+    phase: str
+    description: Optional[str] = None
+    sorumlu: Optional[str] = None
+    priority: str = "Orta"
+    duration: int = 3
+    is_milestone: bool = False
+    start_date: Optional[datetime.date] = None
+    end_date: Optional[datetime.date] = None
+
+
+class WBSWizardQuestionDTO(BaseModel):
+    key: str
+    category: str
+    question: str
+    description: str
+    icon_type: str
+    vendor_field_label: Optional[str] = None
+    current_answer: Optional[str] = None
+    suggested_tasks: List[WBSWizardTaskInput]
+
+
+class WBSWizardApplyRequest(BaseModel):
+    answers: Dict[str, str]  # { "server_hardware_analysis": "Evet", ... }
+    tasks_to_create: List[WBSWizardTaskInput]
+
+
+class WBSWizardApplyResult(BaseModel):
+    created_tasks_count: int
+    project: ProjectDetail
