@@ -3,6 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from ..audit_service import log_audit
 from ..database import get_db
 from ..models import Project, Task, TaskDependency
 from ..scheduling import scheduling_engine
@@ -22,8 +23,8 @@ async def create_dependency(project_id: int, payload: schemas.TaskDependencyCrea
     if project is None:
         raise HTTPException(status_code=404, detail="Proje bulunamadı.")
 
-    task_ids = {t.id for t in project.tasks}
-    if payload.task_id not in task_ids or payload.predecessor_id not in task_ids:
+    task_map = {t.id: t.name for t in project.tasks}
+    if payload.task_id not in task_map or payload.predecessor_id not in task_map:
         raise HTTPException(status_code=400, detail="Task ve bağımlı olduğu task aynı projeye ait olmalıdır.")
     if payload.task_id == payload.predecessor_id:
         raise HTTPException(status_code=400, detail="Bir task kendisine bağımlı olamaz.")
@@ -39,8 +40,30 @@ async def create_dependency(project_id: int, payload: schemas.TaskDependencyCrea
         raise HTTPException(status_code=400, detail="Bu bağımlılık, görevler arasında döngüsel bir bağımlılık oluşturuyor.")
 
     db.add(candidate)
+    await log_audit(
+        db,
+        project_id,
+        "BAĞIMLILIK_EKLENDİ",
+        f"'{task_map.get(payload.task_id)}' görevi, '{task_map.get(payload.predecessor_id)}' tamamlanmasına bağlandı.",
+    )
     await db.flush()
     await db.refresh(candidate)
+
+    # Re-run the schedule immediately so the calendar reflects the new constraint right
+    # away, instead of showing stale/overlapping dates until the user manually clicks
+    # "Tarihleri Hesapla" — a new dependency should visibly move dates without a second step.
+    if project.start_date is not None:
+        try:
+            scheduling_engine.calculate_dates(
+                project.start_date,
+                project.tasks,
+                [*project.dependencies, candidate],
+                exclude_bridge_days=project.exclude_bridge_days,
+            )
+            await db.flush()
+        except ValueError:
+            pass
+
     return candidate
 
 
@@ -50,5 +73,30 @@ async def delete_dependency(dependency_id: int, db: AsyncSession = Depends(get_d
     dependency = result.scalar_one_or_none()
     if dependency is None:
         raise HTTPException(status_code=404, detail="Bağımlılık bulunamadı.")
+    project_id = dependency.project_id
     await db.delete(dependency)
+    await log_audit(db, project_id, "BAĞIMLILIK_SİLİNDİ", f"Görev bağımlılığı (ID: {dependency_id}) kaldırıldı.")
+    await db.flush()
+
+    # Re-run the schedule so removing a constraint can pull dependent tasks earlier again,
+    # same reasoning as create_dependency: the calendar shouldn't need a manual re-trigger.
+    result = await db.execute(
+        select(Project)
+        .options(selectinload(Project.tasks), selectinload(Project.dependencies))
+        .where(Project.id == project_id)
+    )
+    project = result.scalar_one_or_none()
+    if project is not None and project.start_date is not None:
+        try:
+            scheduling_engine.calculate_dates(
+                project.start_date,
+                project.tasks,
+                project.dependencies,
+                exclude_bridge_days=project.exclude_bridge_days,
+            )
+            await db.flush()
+        except ValueError:
+            pass
+
     return None
+

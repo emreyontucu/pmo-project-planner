@@ -11,6 +11,7 @@ const BUSINESS_STATUS_STYLES: Record<string, string> = {
   Aktif: "bg-sky-100 text-sky-700",
   Beklemede: "bg-amber-100 text-amber-700",
   "Tamamlandı": "bg-emerald-100 text-emerald-700",
+  "İptal Edildi": "bg-red-100 text-red-700",
 };
 
 export function BusinessStatusBadge({ status }: { status: string }) {
